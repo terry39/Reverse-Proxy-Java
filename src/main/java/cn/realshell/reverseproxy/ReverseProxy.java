@@ -39,8 +39,8 @@ public class ReverseProxy {
 	}
 
 	private static Logger Log = LoggerFactory.getLogger(ReverseProxy.class);
-	public static int verCode = 1;
-	public static String verName = "0.0.1";
+	public static int verCode = 2;
+	public static String verName = "0.0.2";
 
 	private ReverseProxy() {
 	}

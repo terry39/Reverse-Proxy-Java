@@ -20,16 +20,21 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
 import io.netty.util.AttributeKey;
+import io.netty.util.concurrent.GlobalEventExecutor;
 
 public class ReverseProxyClient extends Thread {
 	private final static Logger Log = LoggerFactory
 			.getLogger(ReverseProxyClient.class);
+
+	private final static AttributeKey<Long> ATTR_LAST_PING = ReverseProxyMainServer.ATTR_LAST_PING;
+	private final static AttributeKey<Long> ATTR_KEY_ID = ReverseProxyMainServer.ATTR_KEY_ID;
 
 	Bootstrap b = null;
 	Channel proxyChannel = null;
@@ -110,8 +115,7 @@ public class ReverseProxyClient extends Thread {
 					proxyChannel.writeAndFlush(buf);
 
 					Channel ch = f.channel();
-					ch.attr(ReverseProxyMainServer.ATTR_KEY_ID).set(
-							connectionId);
+					ch.attr(ATTR_KEY_ID).set(connectionId);
 					clientList.put(connectionId, ch);
 				} else {
 					buf.writeShort(Protocol.DISCONNECT); // type = disconnection
@@ -120,6 +124,44 @@ public class ReverseProxyClient extends Thread {
 				}
 			}
 		});
+	}
+
+	private Thread pingThread = null;
+
+	private void startPingThread() {
+		pingThread = new Thread(
+				() -> {
+					while (!this.isInterrupted()) {
+						try {
+							Thread.sleep(Config.INSTANCE.ping_interval * 1000);
+						} catch (Exception e) {
+							break;
+						}
+
+						if (proxyChannel != null) {
+							long lastPing = proxyChannel
+									.hasAttr(ATTR_LAST_PING) ? proxyChannel
+									.attr(ATTR_LAST_PING).get() : 0L;
+							long NOW = System.currentTimeMillis();
+
+							if (lastPing != 0L
+									&& NOW - lastPing > Config.INSTANCE.ping_timeout * 1000) {
+								ReverseProxyMainServer
+										.closeOnFlush(proxyChannel);
+								break;
+							}
+
+							int len = Long.BYTES + Short.BYTES + Long.BYTES;
+							ByteBuf buf = Unpooled.buffer();
+							buf.writeLong(len);
+							buf.writeShort(Protocol.PING);
+							buf.writeLong(System.currentTimeMillis());
+
+							proxyChannel.writeAndFlush(buf);
+						}
+					}
+				});
+		pingThread.start();
 	}
 
 	private class ChannelMainInit extends ChannelInitializer<Channel> {
@@ -141,11 +183,15 @@ public class ReverseProxyClient extends Thread {
 		@Override
 		public void channelActive(ChannelHandlerContext ctx) throws Exception {
 			// ask for open proxy server on port
-			int len = Long.BYTES + Short.BYTES + Integer.BYTES;
+			byte[] password = Config.INSTANCE.password.getBytes();
+			int len = Long.BYTES + Short.BYTES + Integer.BYTES + Integer.BYTES
+					+ password.length;
 			ByteBuf buf = Unpooled.buffer(len);
 			buf.writeLong(len);
 			buf.writeShort(Protocol.INIT);
+			buf.writeInt(ReverseProxy.verCode);
 			buf.writeInt(Config.INSTANCE.port);
+			buf.writeBytes(password);
 			proxyChannel.writeAndFlush(buf);
 
 			super.channelActive(ctx);
@@ -153,8 +199,18 @@ public class ReverseProxyClient extends Thread {
 
 		@Override
 		public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+
+			localChannelList.close();
+
+			if (pingThread != null && !pingThread.isInterrupted()) {
+				pingThread.interrupt();
+				pingThread = null;
+			}
+
+			// reconnect
 			ctx.channel().eventLoop()
 					.schedule(() -> connectToMainServer(), 1, TimeUnit.SECONDS);
+
 			super.channelInactive(ctx);
 		}
 
@@ -169,36 +225,55 @@ public class ReverseProxyClient extends Thread {
 
 			switch (type) {
 			case 0:
-				boolean succ = msg.readInt() > 0;
-				if (!succ) {
-					Log.error("can not open port on server");
-					ReverseProxyMainServer.closeOnFlush(_ch);
-				}
+				if (msg.readableBytes() >= Integer.BYTES) {
+					boolean succ = msg.readInt() > 0;
+					if (!succ) {
+						Log.error("can not open port on server");
+						ReverseProxyMainServer.closeOnFlush(_ch);
+					} else {
+						startPingThread();
+					}
+				} else
+					ReverseProxyMainServer.closeOnFlush(ch);
 
 				break;
 
 			case 1:
-				// TODO heart beat
+				if (Log.isDebugEnabled() && msg.readableBytes() >= Long.BYTES) {
+					long time = msg.readLong();
+					long NOW = System.currentTimeMillis();
+					Log.debug("delay: " + (NOW - time) + " ms");
+				}
+				ch.attr(ATTR_LAST_PING).set(System.currentTimeMillis());
 				break;
 			case 2:
-				connectionId = msg.readLong();
-				connectToLocalServer(connectionId);
+				if (msg.readableBytes() >= Long.BYTES) {
+					connectionId = msg.readLong();
+					connectToLocalServer(connectionId);
+				} else
+					ReverseProxyMainServer.closeOnFlush(ch);
 				break;
 			case 3:
-				connectionId = msg.readLong();
-				_ch = clientList.get(connectionId);
-				if (_ch != null) {
-					_ch.writeAndFlush(msg.copy());
-				}
+				if (msg.readableBytes() >= Long.BYTES) {
+					connectionId = msg.readLong();
+					_ch = clientList.get(connectionId);
+					if (_ch != null) {
+						_ch.writeAndFlush(msg.copy());
+					}
+				} else
+					ReverseProxyMainServer.closeOnFlush(ch);
 				break;
 
 			case 4:
-				connectionId = msg.readLong();
-				_ch = clientList.get(connectionId);
-				if (_ch != null) {
-					clientList.remove(connectionId);
-					ReverseProxyMainServer.closeOnFlush(_ch);
-				}
+				if (msg.readableBytes() >= Long.BYTES) {
+					connectionId = msg.readLong();
+					_ch = clientList.get(connectionId);
+					if (_ch != null) {
+						clientList.remove(connectionId);
+						ReverseProxyMainServer.closeOnFlush(_ch);
+					}
+				} else
+					ReverseProxyMainServer.closeOnFlush(ch);
 				break;
 
 			case 5:
@@ -227,20 +302,23 @@ public class ReverseProxyClient extends Thread {
 		}
 	}
 
+	public final static DefaultChannelGroup localChannelList = new DefaultChannelGroup(
+			GlobalEventExecutor.INSTANCE);
+
 	private class ReverseProxyClientHandler extends
 			SimpleChannelInboundHandler<ByteBuf> {
 
 		@Override
 		public void channelActive(ChannelHandlerContext ctx) throws Exception {
-
+			localChannelList.add(ctx.channel());
 			super.channelActive(ctx);
 		}
 
 		@Override
 		public void channelInactive(ChannelHandlerContext ctx) throws Exception {
 			Channel ch = ctx.channel();
-			long connectionId = ch.attr(ReverseProxyMainServer.ATTR_KEY_ID)
-					.get();
+			localChannelList.remove(ch);
+			long connectionId = ch.attr(ATTR_KEY_ID).get();
 			if (clientList.containsKey(connectionId)) {
 				clientList.remove(connectionId);
 				int len = Long.BYTES + Short.BYTES + Long.BYTES;
@@ -258,8 +336,7 @@ public class ReverseProxyClient extends Thread {
 		protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg)
 				throws Exception {
 			Channel ch = ctx.channel();
-			long connectionId = ch.attr(ReverseProxyMainServer.ATTR_KEY_ID)
-					.get();
+			long connectionId = ch.attr(ATTR_KEY_ID).get();
 
 			int len = Long.BYTES + Short.BYTES + Long.BYTES
 					+ msg.readableBytes();

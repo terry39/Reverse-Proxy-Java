@@ -5,7 +5,7 @@ public class Protocol {
 	/**
 	 * client to server: <br />
 	 * request {port} for create reverse proxy tunnel<br />
-	 * {LEN|TYPE|PORT}
+	 * {LEN|TYPE|VER|PORT|PASSWORD}
 	 * 
 	 * server to client:<br />
 	 * result of request<br />

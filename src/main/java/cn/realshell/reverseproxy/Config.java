@@ -23,6 +23,14 @@ public class Config {
 	 * client config: request server to bind port for new proxy tunnel
 	 */
 	public int port = 0;
+	
+	/**
+	 * client connect with password
+	 */
+	public String password = null;
+	
+	public int ping_timeout = 30;
+	public int ping_interval = 3;
 
 	/**
 	 * single instance
@@ -47,9 +55,10 @@ public class Config {
 		Config config = null;
 		try {
 			config = g.fromJson(readFileToString(f), Config.class);
+			if(config.password == null)
+				return false;
 			INSTANCE = config;
 		} catch (Exception e) {
-			e.printStackTrace();
 		}
 
 		return null != config;

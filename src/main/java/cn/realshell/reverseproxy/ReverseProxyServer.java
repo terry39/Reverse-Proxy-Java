@@ -1,6 +1,7 @@
 package cn.realshell.reverseproxy;
 
 import java.util.HashMap;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,10 +21,13 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
+import io.netty.util.AttributeKey;
 
 public class ReverseProxyServer extends Thread {
 	private final static Logger Log = LoggerFactory
 			.getLogger(ReverseProxyServer.class);
+
+	private final static AttributeKey<Long> ATTR_KEY_ID = ReverseProxyMainServer.ATTR_KEY_ID;
 
 	EventLoopGroup bGroup = new NioEventLoopGroup(1);
 	EventLoopGroup wGroup = new NioEventLoopGroup();
@@ -116,7 +120,7 @@ public class ReverseProxyServer extends Thread {
 			}
 
 			long connectionId = getSerializeId();
-			ch.attr(ReverseProxyMainServer.ATTR_KEY_ID).set(connectionId);
+			ch.attr(ATTR_KEY_ID).set(connectionId);
 			clientList.put(connectionId, ctx.channel());
 
 			ByteBuf buf = Unpooled.buffer();
@@ -132,8 +136,7 @@ public class ReverseProxyServer extends Thread {
 		protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg)
 				throws Exception {
 			Channel ch = ctx.channel();
-			long connectionId = ch.attr(ReverseProxyMainServer.ATTR_KEY_ID)
-					.get();
+			long connectionId = ch.attr(ATTR_KEY_ID).get();
 
 			ByteBuf buf = Unpooled.buffer();
 
@@ -149,8 +152,7 @@ public class ReverseProxyServer extends Thread {
 		@Override
 		public void channelInactive(ChannelHandlerContext ctx) throws Exception {
 			Channel ch = ctx.channel();
-			long connectionId = ch.attr(ReverseProxyMainServer.ATTR_KEY_ID)
-					.get();
+			long connectionId = ch.attr(ATTR_KEY_ID).get();
 			clientList.remove(connectionId);
 
 			int len = Long.BYTES + Short.BYTES + Long.BYTES;
